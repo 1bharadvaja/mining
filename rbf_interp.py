@@ -176,6 +176,71 @@ def plot_interpolated_3d(rbf_func, x_range, y_range, z_range, resolution=10):
     plt.colorbar(scatter, label="Interpolated Zn_pct")
     plt.show()
 
+#this function plots the mineral deposit depending on whether the data
+# shows a certain threshold of concentration has been passed at the coordinate
+
+
+def plot_voxel_threshold(rbf_func, x_range, y_range, z_range, threshold, resolution=20):
+    """
+    Plot voxels representing areas where the interpolated value exceeds a threshold.
+    
+    A 3D grid is created over the specified ranges. The RBF interpolator is then
+    evaluated at the centers of each voxel. Voxels are drawn only if the interpolated
+    value exceeds the given threshold. The voxel color is set using the "viridis" colormap,
+    so that variations above the threshold are visually apparent.
+
+    Parameters:
+        rbf_func: The RBF interpolator function.
+        x_range, y_range, z_range (tuple): The (min, max) boundaries of each axis.
+        threshold (float): The threshold value for Zn_pct.
+        resolution (int): Number of grid points along each axis.
+    """
+    # Create grid centers for evaluation.
+    x_centers = np.linspace(x_range[0], x_range[1], resolution)
+    y_centers = np.linspace(y_range[0], y_range[1], resolution)
+    z_centers = np.linspace(z_range[0], z_range[1], resolution)
+    Xc, Yc, Zc = np.meshgrid(x_centers, y_centers, z_centers, indexing='ij')
+    VI = rbf_func(Xc, Yc, Zc)
+    print(VI)
+
+    # Create a boolean mask: True where the interpolated value exceeds the threshold.
+    mask = VI >= threshold
+    print(mask)
+    colors = np.empty(mask.shape, dtype=object)
+    colors[mask] = 'red'
+
+    ax = plt.figure().add_subplot(projection='3d')
+    ax.voxels(mask, facecolors=colors, edgecolor='k')
+
+
+
+
+    # Prepare a facecolors array using a colormap.
+    """cmap = plt.get_cmap('viridis')
+    norm = plt.Normalize(np.min(VI), np.max(VI))
+    # Allocate facecolors with an extra dimension for RGBA (i.e., shape = mask.shape + (4,))
+    facecolors = np.empty(mask.shape + (4,), dtype=float)
+    
+    # For voxels where mask is True, assign color from colormap.
+    facecolors[mask] = cmap(norm(VI[mask]))
+    # For voxels where mask is False, assign a transparent color.
+    facecolors[~mask] = (0, 0, 0, 0)
+
+    # Create grid boundaries for the voxels.
+    x_bound = np.linspace(x_range[0], x_range[1], resolution + 1)
+    y_bound = np.linspace(y_range[0], y_range[1], resolution + 1)
+    z_bound = np.linspace(z_range[0], z_range[1], resolution + 1)
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.voxels(x_bound, y_bound, z_bound, mask, facecolors=facecolors, edgecolor='k', alpha=0.5)
+    ax.set_xlabel("Easting")
+    ax.set_ylabel("Northing")
+    ax.set_zlabel("Elevation")
+    plt.title(f"Voxel Plot of Mineral Deposit (Threshold = {threshold})")
+    plt.show()"""
+
+
 def main():
     # File paths (update these to your actual CSV file locations)
     collar_csv = "MPA_Collar_20240227.csv"
