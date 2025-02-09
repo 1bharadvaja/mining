@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Geologist Inference Web App</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    .container {
+      max-width: 900px;
+      margin: auto;
+    }
+    #map {
+      height: 400px;
+      margin-bottom: 20px;
+    }
+    #resultChart {
+      max-width: 900px;
+      margin: auto;
+    }
+    input[type="file"] {
+      margin-top: 5px;
+    }
+    label {
+      font-weight: bold;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Geologist Inference Web App</h1>
+    <p>
+      Upload your drill data and (optionally) a shapefile to generate a grid overlay.
+      Then select an inference area on the map and run the ML inference.
+    </p>
+    
+    <!-- Drill Data Upload -->
+    <div>
+      <label for="drillDataInput">Upload Drill Data (CSV/JSON):</label>
+      <input type="file" id="drillDataInput" accept=".csv, .json">
+    </div>
+    <br>
+    
+    <!-- Shapefile Upload -->
+    <div>
+      <label for="shapefileInput">Upload Shapefile (.zip):</label>
+      <input type="file" id="shapefileInput" accept=".zip">
+    </div>
+    <br>
+    
+    <!-- Map for Area Selection -->
+    <div id="map"></div>
+    <div style="text-align: center;">
+      <button id="runInferenceButton" disabled>Run Inference</button>
+    </div>
+    <br>
+    
+    <!-- Chart for Displaying Inference Results -->
+    <canvas id="resultChart" width="900" height="400"></canvas>
+  </div>
+
+  <!-- Include Leaflet JS -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <!-- Include Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Include ONNX Runtime Web -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <!-- Include PapaParse for CSV parsing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+  <!-- Include shp.js for Shapefile parsing -->
+  <script src="https://unpkg.com/shpjs@latest/dist/shp.min.js"></script>
+  <!-- Include Turf.js for grid generation -->
+  <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+
+  <script>
+    /***************************************
+     * Global Variables
+     ***************************************/
+    let drillData = null;      // Parsed drill data from CSV/JSON
+    let selectedArea = null;   // Coordinates of the drawn rectangle
+    let inferenceResult = null;
+    let shapefileGeoJSON = null; // GeoJSON from the uploaded shapefile
+
+    /***************************************
+     * Initialize Leaflet Map
+     ***************************************/
+    const map = L.map('map').setView([37.7749, -122.4194], 13); // Default view (San Francisco)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let rectangle = null;
+    let startPoint = null;
+
+    // Allow drawing a rectangle to select the inference area.
+    map.on('mousedown', function(e) {
+      startPoint = e.latlng;
+      if (rectangle) {
+        map.removeLayer(rectangle);
+        rectangle = null;
+      }
+    });
+
+    map.on('mouseup', function(e) {
+      if (!startPoint) return;
+      const endPoint = e.latlng;
+      rectangle = L.rectangle([startPoint, endPoint], { color: "#ff7800", weight: 1 });
+      rectangle.addTo(map);
+      // Save selected area coordinates.
+      selectedArea = { start: startPoint, end: endPoint };
+      checkReadyToRun();
+      startPoint = null; // Reset for next drawing.
+    });
+
+    /***************************************
+     * Drill Data File Upload Handling
+     ***************************************/
+    document.getElementById('drillDataInput').addEventListener('change', function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const content = e.target.result;
+        const extension = file.name.split('.').pop().toLowerCase();
+        if (extension === 'csv') {
+          Papa.parse(content, {
+            header: true,
+            dynamicTyping: true,
+            complete: function(results) {
+              drillData = results.data;
+              console.log('Parsed CSV Data:', drillData);
+              checkReadyToRun();
+            },
+            error: function(error) {
+              console.error('Error parsing CSV:', error);
+            }
+          });
+        } else if (extension === 'json') {
+          try {
+            drillData = JSON.parse(content);
+            console.log('Parsed JSON Data:', drillData);
+            checkReadyToRun();
+          } catch (error) {
+            console.error('Error parsing JSON:', error);
+          }
+        } else {
+          alert('Unsupported drill data format. Please upload a CSV or JSON file.');
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    /***************************************
+     * Shapefile Upload Handling
+     ***************************************/
+    document.getElementById('shapefileInput').addEventListener('change', function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const arrayBuffer = e.target.result;
+        // Use shp.js to parse the zipped shapefile.
+        shp(arrayBuffer)
+          .then(function(geojson) {
+            shapefileGeoJSON = geojson;
+            console.log('Shapefile GeoJSON:', shapefileGeoJSON);
+            // Remove previous shapefile layer if it exists.
+            if (window.shapefileLayer) {
+              map.removeLayer(window.shapefileLayer);
+            }
+            // Add the shapefile (GeoJSON) layer.
+            window.shapefileLayer = L.geoJSON(shapefileGeoJSON, {
+              style: { color: '#3388ff', weight: 2, fillOpacity: 0.1 }
+            }).addTo(map);
+            // Zoom the map to the shapefile's extent.
+            map.fitBounds(window.shapefileLayer.getBounds());
+            // Generate and display a grid overlay based on the shapefile bounds.
+            generateGridFromGeoJSON(shapefileGeoJSON);
+          })
+          .catch(function(err) {
+            console.error('Error processing shapefile:', err);
+            alert('Failed to process shapefile. Please ensure it is a valid zipped shapefile.');
+          });
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    /***************************************
+     * Generate Grid Overlay from Shapefile
+     ***************************************/
+    function generateGridFromGeoJSON(geojson) {
+      // Compute the bounding box of the shapefile.
+      const bbox = turf.bbox(geojson);
+      // Define the cell side length in kilometers (adjust as needed).
+      const cellSide = 1;
+      // Generate a square grid covering the bounding box.
+      const grid = turf.squareGrid(bbox, cellSide, { units: 'kilometers' });
+      // Remove any previous grid layer.
+      if (window.gridLayer) {
+        map.removeLayer(window.gridLayer);
+      }
+      // Add the grid layer to the map.
+      window.gridLayer = L.geoJSON(grid, {
+        style: { color: '#ff0000', weight: 1, fillOpacity: 0 }
+      }).addTo(map);
+    }
+
+    /***************************************
+     * Check if Ready to Run Inference
+     * (Requires both drill data and an inference area)
+     ***************************************/
+    function checkReadyToRun() {
+      const runButton = document.getElementById('runInferenceButton');
+      if (drillData && selectedArea) {
+        runButton.disabled = false;
+      } else {
+        runButton.disabled = true;
+      }
+    }
+
+    /***************************************
+     * Data Preprocessing Function
+     * Modify this function to prepare your model's input.
+     ***************************************/
+    function preprocessData(drillData, selectedArea) {
+      // This demo function creates a dummy Float32Array.
+      // In practice, use 'drillData' and 'selectedArea' (and/or shapefile data)
+      // to create the input vector for your model.
+      const N = 10;  // For example, your model might expect 10 features.
+      const inputData = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        // Replace this with real preprocessing logic.
+        inputData[i] = Math.random();
+      }
+      return inputData;
+    }
+
+    /***************************************
+     * Run ONNX Inference
+     ***************************************/
+    async function runInference() {
+      // Preprocess the data.
+      const inputData = preprocessData(drillData, selectedArea);
+
+      // Path to your ONNX model file.
+      const modelUrl = 'model.onnx'; // Ensure model.onnx is accessible.
+      try {
+        // Load the ONNX model.
+        const session = await ort.InferenceSession.create(modelUrl);
+        // Prepare the input tensor (adjust type and dimensions as needed).
+        const tensor = new ort.Tensor('float32', inputData, [1, inputData.length]);
+        // Replace 'input' with your model's actual input name.
+        const feeds = { 'input': tensor };
+        // Run inference.
+        const results = await session.run(feeds);
+        // Assume the first output is our result.
+        const outputTensor = results[session.outputNames[0]];
+        inferenceResult = outputTensor.data;
+        console.log('Inference Result:', inferenceResult);
+        // Visualize the inference results.
+        displayChart(inferenceResult);
+      } catch (err) {
+        console.error('Error running inference:', err);
+        alert('Failed to run inference. Check the console for details.');
+      }
+    }
+
+    /***************************************
+     * Display Chart using Chart.js
+     ***************************************/
+    function displayChart(data) {
+      const ctx = document.getElementById('resultChart').getContext('2d');
+      // Generate simple labels (e.g., Point 1, Point 2, …).
+      const labels = data.map((_, index) => 'Point ' + (index + 1));
+      // Destroy any existing chart instance.
+      if (window.myChart) {
+        window.myChart.destroy();
+      }
+      // Create a new chart.
+      window.myChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Inference Output',
+            data: data,
+            borderColor: 'rgba(75, 192, 192, 1)',
+            backgroundColor: 'rgba(75, 192, 192, 0.2)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.1
+          }]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            y: {
+              beginAtZero: true
+            }
+          }
+        }
+      });
+    }
+
+    /***************************************
+     * Bind Run Inference Button
+     ***************************************/
+    document.getElementById('runInferenceButton').addEventListener('click', function() {
+      runInference();
+    });
+  </script>
+</body>
+</html>
